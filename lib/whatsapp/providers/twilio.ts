@@ -24,8 +24,13 @@ export const twilioProvider: WhatsAppProvider = {
       },
       body,
     });
-    if (!res.ok) return { ok: false, error: `Twilio ${res.status}` };
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      console.warn(`[wa:twilio] send failed ${res.status} -> ${msg.to}: ${errBody.slice(0, 300)}`);
+      return { ok: false, error: `Twilio ${res.status}: ${errBody.slice(0, 200)}` };
+    }
     const data = (await res.json()) as { sid?: string };
+    console.log(`[wa:twilio] sent ${data.sid} -> ${msg.to}`);
     return { ok: true, providerMessageId: data.sid };
   },
 };

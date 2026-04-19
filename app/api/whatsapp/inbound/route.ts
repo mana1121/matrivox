@@ -81,10 +81,16 @@ export async function POST(req: Request) {
         changeSource: "whatsapp",
       });
 
-      await sendWhatsApp({
-        to: phone,
-        body: Templates.statusAck(target.complaint_code, cmd),
-      });
+      // PIC ack — never let a Twilio rate-limit failure break the response.
+      try {
+        const r = await sendWhatsApp({
+          to: phone,
+          body: Templates.statusAck(target.complaint_code, cmd),
+        });
+        if (!r.ok) console.warn(`[wa] PIC ack send failed -> ${phone}: ${r.error}`);
+      } catch (err) {
+        console.warn(`[wa] PIC ack send threw -> ${phone}:`, err);
+      }
 
       return NextResponse.json({
         ok: true,

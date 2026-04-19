@@ -158,7 +158,11 @@ export async function processIncomingComplaint(
 
   // Step 6a: ack complainant
   const ack = Templates.ticketCreatedToComplainant(created.complaint_code);
-  await sendWhatsApp({ to: msg.phone, body: ack });
+  await sendWhatsAppSafe({ to: msg.phone, body: ack });
+
+  // Twilio sandbox throttles tightly — pause before the next outbound message
+  // so the second send isn't dropped silently.
+  await sleep(1500);
 
   // Step 6b: notify PIC
   let picNotification: string | null = null;
@@ -170,7 +174,7 @@ export async function processIncomingComplaint(
       summary: classification.summary,
       complainantPhone: msg.phone,
     });
-    await sendWhatsApp({ to: pic.whatsapp_phone, body: picNotification });
+    await sendWhatsAppSafe({ to: pic.whatsapp_phone, body: picNotification });
   }
 
   return {
@@ -223,10 +227,31 @@ export async function applyStatusCommand(opts: {
   });
 
   if (opts.newStatus === "Selesai") {
-    await sendWhatsApp({
+    await sendWhatsAppSafe({
       to: existing.complainant_phone,
       body: Templates.closureToComplainant(),
     });
+    // Pause before the caller's next outbound (PIC ack) so Twilio doesn't drop it.
+    await sleep(1500);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Wrapper around sendWhatsApp that never throws — failures are logged so a
+ * single rate-limited message doesn't break the rest of the intake flow.
+ */
+async function sendWhatsAppSafe(msg: { to: string; body: string }): Promise<void> {
+  try {
+    const r = await sendWhatsApp(msg);
+    if (!r.ok) {
+      console.warn(`[intake] WhatsApp send failed -> ${msg.to}: ${r.error}`);
+    }
+  } catch (err) {
+    console.warn(`[intake] WhatsApp send threw -> ${msg.to}:`, err);
   }
 }
 
