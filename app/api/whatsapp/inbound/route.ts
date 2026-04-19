@@ -8,28 +8,41 @@ import {
 import { Templates, sendWhatsApp } from "@/lib/whatsapp";
 
 /**
- * Unified inbound endpoint — usable by:
- * 1) The Demo Console (POST JSON: { phone, text, evidenceDataUrl?, imageDescription? })
- * 2) Real WhatsApp providers (after a thin adapter normalizes their payload).
+ * Unified inbound endpoint — handles three payload formats:
  *
- * Behavior:
- * - If sender phone matches an active PIC and the text is a status command,
- *   apply the command to the PIC's most recent open complaint.
- * - Otherwise, run the complaint intake pipeline.
+ *   1) Demo Console (JSON): { phone, text, evidenceDataUrl?, imageDescription? }
+ *   2) Twilio WhatsApp     : application/x-www-form-urlencoded
+ *                            (From, Body, NumMedia, MediaUrl0, MediaContentType0…)
+ *   3) Meta WhatsApp Cloud : nested JSON under entry[].changes[].value.messages[]
+ *
+ * Behavior is the same regardless of source:
+ *   - PIC commands (TERIMA / DALAM TINDAKAN / SELESAI) update the most recent
+ *     open complaint for that PIC's category.
+ *   - Anything else runs through `processIncomingComplaint`.
  */
+
+type NormalizedInbound = {
+  phone: string;
+  text: string;
+  evidenceUrl: string | null;
+  imageDescription?: string;
+};
+
 export async function POST(req: Request) {
-  let body: any;
+  let normalized: NormalizedInbound | null = null;
   try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    normalized = await normalizeInbound(req);
+  } catch (err) {
+    console.error("[inbound] normalize failed:", err);
+    return NextResponse.json({ error: "Could not parse payload" }, { status: 400 });
   }
 
-  const phone: string = String(body.phone || "").trim();
-  const text: string = String(body.text || "").trim();
-  if (!phone || !text) {
-    return NextResponse.json({ error: "phone & text are required" }, { status: 400 });
+  if (!normalized || !normalized.phone || !normalized.text) {
+    // Twilio expects 200 even on no-op so it doesn't retry
+    return NextResponse.json({ ok: true, kind: "ignored" });
   }
+
+  const { phone, text } = normalized;
 
   // Step A: PIC command path
   const cmd = parsePicCommand(text);
@@ -44,7 +57,6 @@ export async function POST(req: Request) {
       .maybeSingle();
 
     if (pic) {
-      // Find the most recent open complaint for this PIC's category
       const { data: target } = await sb
         .from("complaints")
         .select("id, complaint_code, status")
@@ -84,38 +96,199 @@ export async function POST(req: Request) {
     // sender isn't a PIC — fall through to complaint intake
   }
 
-  // Step B: complaint intake. Resolve evidence URL — for the demo we can
-  // accept either a remote URL or a base64 data URL (we upload it to Storage).
-  let evidenceUrl: string | null = null;
-  if (typeof body.evidenceDataUrl === "string" && body.evidenceDataUrl.length > 0) {
-    if (body.evidenceDataUrl.startsWith("data:")) {
-      evidenceUrl = await uploadDataUrlToStorage(body.evidenceDataUrl, phone);
-    } else {
-      evidenceUrl = body.evidenceDataUrl;
-    }
-  }
-
   const outcome = await processIncomingComplaint({
     phone,
     text,
-    evidenceUrl,
-    imageDescription: body.imageDescription,
+    evidenceUrl: normalized.evidenceUrl,
+    imageDescription: normalized.imageDescription,
   });
 
   return NextResponse.json(outcome);
 }
 
-async function uploadDataUrlToStorage(dataUrl: string, phone: string): Promise<string | null> {
+// ---------------------------------------------------------------------------
+// Payload normalization — branches on Content-Type and shape
+// ---------------------------------------------------------------------------
+
+async function normalizeInbound(req: Request): Promise<NormalizedInbound | null> {
+  const contentType = (req.headers.get("content-type") || "").toLowerCase();
+
+  // Twilio: application/x-www-form-urlencoded (or multipart for media)
+  if (
+    contentType.includes("application/x-www-form-urlencoded") ||
+    contentType.includes("multipart/form-data")
+  ) {
+    const form = await req.formData();
+    return await fromTwilioForm(form);
+  }
+
+  // JSON body (Demo Console or Meta)
+  const json = await req.json();
+
+  // Meta WhatsApp Cloud API webhook
+  if (json && typeof json === "object" && (json as any).object === "whatsapp_business_account") {
+    return await fromMetaPayload(json);
+  }
+
+  // Demo Console — accept either a hosted URL or a base64 data URL
+  const phone = String(json.phone || "").trim();
+  const text = String(json.text || "").trim();
+  let evidenceUrl: string | null = null;
+  if (typeof json.evidenceDataUrl === "string" && json.evidenceDataUrl.length > 0) {
+    if (json.evidenceDataUrl.startsWith("data:")) {
+      evidenceUrl = await uploadBytesToStorage(
+        Buffer.from(json.evidenceDataUrl.replace(/^data:.+?;base64,/, ""), "base64"),
+        json.evidenceDataUrl.match(/^data:(.+?);base64,/)?.[1] || "image/jpeg",
+        phone
+      );
+    } else {
+      evidenceUrl = json.evidenceDataUrl;
+    }
+  }
+  return {
+    phone,
+    text,
+    evidenceUrl,
+    imageDescription: json.imageDescription,
+  };
+}
+
+function stripWhatsappPrefix(s: string): string {
+  return s.replace(/^whatsapp:/i, "").trim();
+}
+
+async function fromTwilioForm(form: FormData): Promise<NormalizedInbound> {
+  const phone = stripWhatsappPrefix(String(form.get("From") || ""));
+  const text = String(form.get("Body") || "").trim();
+  const numMedia = parseInt(String(form.get("NumMedia") || "0"), 10) || 0;
+
+  let evidenceUrl: string | null = null;
+  if (numMedia > 0) {
+    const mediaUrl = String(form.get("MediaUrl0") || "");
+    const mediaContentType = String(form.get("MediaContentType0") || "image/jpeg");
+    if (mediaUrl) {
+      evidenceUrl = await fetchTwilioMediaToStorage(mediaUrl, mediaContentType, phone);
+    }
+  }
+
+  return { phone, text, evidenceUrl };
+}
+
+async function fromMetaPayload(payload: any): Promise<NormalizedInbound | null> {
   try {
-    const m = dataUrl.match(/^data:(.+?);base64,(.+)$/);
-    if (!m) return dataUrl;
-    const mime = m[1];
-    const ext = mime.split("/")[1]?.split(";")[0] || "bin";
-    const bytes = Buffer.from(m[2], "base64");
+    const value = payload?.entry?.[0]?.changes?.[0]?.value;
+    const message = value?.messages?.[0];
+    if (!message) return null;
+
+    const rawPhone = String(message.from || "").trim();
+    const phone = rawPhone.startsWith("+") ? rawPhone : `+${rawPhone}`;
+
+    let text = "";
+    let mediaId: string | null = null;
+    let mediaMime = "image/jpeg";
+
+    if (message.type === "text") {
+      text = String(message.text?.body || "").trim();
+    } else if (message.type === "image") {
+      text = String(message.image?.caption || "").trim();
+      mediaId = String(message.image?.id || "") || null;
+      mediaMime = String(message.image?.mime_type || "image/jpeg");
+    }
+
+    let evidenceUrl: string | null = null;
+    if (mediaId) {
+      evidenceUrl = await fetchMetaMediaToStorage(mediaId, mediaMime, phone);
+    }
+
+    return { phone, text, evidenceUrl };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Media fetchers — both download with provider auth, then re-upload to
+// Supabase storage so the public URL we save in the complaint row is stable.
+// ---------------------------------------------------------------------------
+
+async function fetchTwilioMediaToStorage(
+  mediaUrl: string,
+  contentTypeHint: string,
+  phone: string
+): Promise<string | null> {
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token) {
+    console.warn("[twilio-media] missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN");
+    return null;
+  }
+  try {
+    const auth = Buffer.from(`${sid}:${token}`).toString("base64");
+    const res = await fetch(mediaUrl, {
+      headers: { Authorization: `Basic ${auth}` },
+      redirect: "follow",
+    });
+    if (!res.ok) {
+      console.warn(`[twilio-media] fetch ${res.status}`);
+      return null;
+    }
+    const ct = res.headers.get("content-type") || contentTypeHint;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    return await uploadBytesToStorage(bytes, ct, phone);
+  } catch (err) {
+    console.warn("[twilio-media] threw:", err);
+    return null;
+  }
+}
+
+async function fetchMetaMediaToStorage(
+  mediaId: string,
+  mimeHint: string,
+  phone: string
+): Promise<string | null> {
+  const accessToken = process.env.META_WA_ACCESS_TOKEN;
+  if (!accessToken) {
+    console.warn("[meta-media] missing META_WA_ACCESS_TOKEN");
+    return null;
+  }
+  try {
+    // Meta requires a 2-step download: GET media metadata → GET URL it returns.
+    const metaRes = await fetch(`https://graph.facebook.com/v20.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!metaRes.ok) {
+      console.warn(`[meta-media] metadata fetch ${metaRes.status}`);
+      return null;
+    }
+    const meta = (await metaRes.json()) as { url?: string; mime_type?: string };
+    if (!meta.url) return null;
+    const fileRes = await fetch(meta.url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!fileRes.ok) {
+      console.warn(`[meta-media] file fetch ${fileRes.status}`);
+      return null;
+    }
+    const ct = fileRes.headers.get("content-type") || meta.mime_type || mimeHint;
+    const bytes = Buffer.from(await fileRes.arrayBuffer());
+    return await uploadBytesToStorage(bytes, ct, phone);
+  } catch (err) {
+    console.warn("[meta-media] threw:", err);
+    return null;
+  }
+}
+
+async function uploadBytesToStorage(
+  bytes: Buffer,
+  contentType: string,
+  phone: string
+): Promise<string | null> {
+  try {
+    const ext = contentType.split("/")[1]?.split(";")[0] || "bin";
     const sb = createAdminClient();
     const path = `inbound/${phone.replace(/[^\w+]/g, "")}/${Date.now()}.${ext}`;
     const { error } = await sb.storage.from("evidence").upload(path, bytes, {
-      contentType: mime,
+      contentType,
       upsert: false,
     });
     if (error) {
@@ -130,7 +303,26 @@ async function uploadDataUrlToStorage(dataUrl: string, phone: string): Promise<s
   }
 }
 
-export async function GET() {
-  // Convenience for provider verification (Meta uses GET hub challenge).
+// ---------------------------------------------------------------------------
+// GET — Meta webhook handshake + health check
+// ---------------------------------------------------------------------------
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const mode = url.searchParams.get("hub.mode");
+  const token = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge");
+
+  // Meta WhatsApp Cloud API webhook subscription handshake
+  if (mode === "subscribe" && token && challenge) {
+    const expected = process.env.WHATSAPP_WEBHOOK_SECRET || "matrivox-demo";
+    if (token === expected) {
+      return new Response(challenge, {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    }
+    return new Response("forbidden", { status: 403 });
+  }
+
   return NextResponse.json({ ok: true, service: "matrivox-whatsapp-inbound" });
 }
