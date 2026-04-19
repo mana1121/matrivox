@@ -47,15 +47,49 @@ export async function processIncomingComplaint(
     raw_payload_json: { evidenceUrl: msg.evidenceUrl ?? null },
   });
 
-  // Step 2: must have evidence
-  if (!msg.evidenceUrl) {
+  // Conversation memory: if the current message has no evidence, look back
+  // for a recent unresolved message from the same phone that DID include
+  // evidence. WhatsApp users naturally split a complaint across multiple
+  // messages (photo first, then location in reply), so we stitch them back
+  // together here. We also concatenate prior text so the classifier sees
+  // the full context (e.g. "projektor tak function" + "dkb1" -> location=dkb1).
+  let evidenceUrl = msg.evidenceUrl ?? null;
+  let workingText = msg.text;
+  const TEN_MIN_AGO = new Date(Date.now() - 10 * 60_000).toISOString();
+
+  if (!evidenceUrl) {
+    const { data: recent } = await sb
+      .from("complaint_messages")
+      .select("message_text, raw_payload_json")
+      .eq("sender_phone", msg.phone)
+      .eq("direction", "incoming")
+      .is("complaint_id", null)
+      .gte("created_at", TEN_MIN_AGO)
+      .order("created_at", { ascending: false })
+      .limit(5);
+
+    const priorWithMedia = (recent ?? []).find(
+      (m) => (m.raw_payload_json as any)?.evidenceUrl
+    );
+    if (priorWithMedia) {
+      evidenceUrl = (priorWithMedia.raw_payload_json as any).evidenceUrl;
+      const priorText = (priorWithMedia.message_text || "").trim();
+      // Combine prior + current so Claude sees both together
+      workingText = priorText
+        ? `${priorText}. ${msg.text}`.trim()
+        : msg.text;
+    }
+  }
+
+  // Step 2: must have evidence (current message or recent context)
+  if (!evidenceUrl) {
     const reply = Templates.evidenceRequest();
     await sendWhatsApp({ to: msg.phone, body: reply });
     return { kind: "evidence_required", replySent: reply };
   }
 
-  // Step 3: classify
-  const classification = await classifyComplaint(msg.text, msg.imageDescription);
+  // Step 3: classify with combined text
+  const classification = await classifyComplaint(workingText, msg.imageDescription);
 
   if (classification.needs_followup || !classification.category) {
     const reply =
@@ -95,13 +129,13 @@ export async function processIncomingComplaint(
     .from("complaints")
     .insert({
       complainant_phone: msg.phone,
-      original_message: msg.text,
+      original_message: workingText,
       ai_summary: classification.summary,
       category,
       location: classification.location,
       assigned_pic_user_id: pic?.id ?? null,
       status: initialStatus,
-      evidence_file_url: msg.evidenceUrl,
+      evidence_file_url: evidenceUrl,
       ai_confidence: classification.confidence,
       source_channel: "whatsapp",
     })
@@ -112,14 +146,15 @@ export async function processIncomingComplaint(
     throw new Error(`Failed to create complaint: ${insertErr?.message}`);
   }
 
-  // Backfill the inbound message with the new complaint id
+  // Backfill the inbound messages (current + any earlier unresolved ones from
+  // this phone in the last 10 min) so they all link to the new complaint.
   await sb
     .from("complaint_messages")
     .update({ complaint_id: created.id })
     .is("complaint_id", null)
     .eq("sender_phone", msg.phone)
     .eq("direction", "incoming")
-    .gte("created_at", new Date(Date.now() - 60_000).toISOString());
+    .gte("created_at", TEN_MIN_AGO);
 
   // Step 6a: ack complainant
   const ack = Templates.ticketCreatedToComplainant(created.complaint_code);
