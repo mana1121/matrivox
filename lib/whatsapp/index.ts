@@ -125,6 +125,13 @@ export const Templates = {
     `• *SELESAI* — aduan selesai\n\n` +
     `Terima kasih atas khidmat anda. 🙏`,
 
+  // Asked to PIC when they type "SELESAI" without a resolution note —
+  // prompts them to describe the action taken before closing the ticket.
+  picAskResolution: (code: string) =>
+    `Terima kasih. Sebelum kami menutup aduan *${code}*, sila kongsi ringkasan tindakan yang telah diambil.\n\n` +
+    `Contoh: _paip telah diganti, tandas kini boleh digunakan_.\n\n` +
+    `Balasan anda akan dihantar kepada pengadu sebagai penyelesaian rasmi.`,
+
   // P1–P3: ack to PIC after they update status (with confirmation that
   // the complainant has been notified where applicable)
   picStatusAck: (opts: { code: string; status: Status; complainantNotified: boolean }) => {

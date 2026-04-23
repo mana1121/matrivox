@@ -56,6 +56,75 @@ export async function POST(req: Request) {
 
   // Step A: PIC command path (parses "SELESAI <remark>" etc.)
   const cmd = parsePicCommand(text);
+
+  // Step A': if this sender is a PIC who was just asked for a resolution
+  // note, treat the current free-text message as the resolution for that
+  // complaint and close it. Only triggers when the text is NOT itself a
+  // command (so TERIMA/DALAM TINDAKAN still override normally).
+  if (!cmd) {
+    const sb = createAdminClient();
+    const { data: pic } = await sb
+      .from("users")
+      .select("id, role, is_active")
+      .eq("whatsapp_phone", phone)
+      .eq("role", "pic")
+      .eq("is_active", true)
+      .maybeSingle();
+
+    if (pic) {
+      const fifteenMinAgo = new Date(Date.now() - 15 * 60_000).toISOString();
+      const { data: pending } = await sb
+        .from("complaint_messages")
+        .select("complaint_id, raw_payload_json, created_at")
+        .eq("sender_phone", phone)
+        .eq("direction", "outgoing")
+        .gte("created_at", fifteenMinAgo)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      const pendingIntent = (pending?.[0]?.raw_payload_json as { bot_intent?: string } | null)
+        ?.bot_intent;
+      const pendingComplaintId = pending?.[0]?.complaint_id;
+
+      if (pendingIntent === "pic_awaiting_resolution" && pendingComplaintId) {
+        // Close the ticket with this text as the resolution remark.
+        const { data: target } = await sb
+          .from("complaints")
+          .select("id, complaint_code, status")
+          .eq("id", pendingComplaintId)
+          .maybeSingle();
+
+        if (target && target.status !== "Selesai") {
+          await applyStatusCommand({
+            complaintId: target.id,
+            newStatus: "Selesai",
+            changedByUserId: pic.id,
+            changeSource: "whatsapp",
+            picRemark: text,
+          });
+          try {
+            await sendWhatsApp({
+              to: phone,
+              body: Templates.picStatusAck({
+                code: target.complaint_code,
+                status: "Selesai",
+                complainantNotified: true,
+              }),
+            });
+          } catch (err) {
+            console.warn(`[wa] PIC closure ack threw -> ${phone}:`, err);
+          }
+          return NextResponse.json({
+            ok: true,
+            kind: "pic_resolution_captured",
+            complaint_code: target.complaint_code,
+            pic_remark: text,
+          });
+        }
+      }
+    }
+  }
+
   if (cmd) {
     const sb = createAdminClient();
     const { data: pic } = await sb
@@ -82,6 +151,34 @@ export async function POST(req: Request) {
           body: "Tiada aduan terbuka untuk kategori anda buat masa ini.",
         });
         return NextResponse.json({ ok: true, kind: "pic_no_open_ticket" });
+      }
+
+      // If PIC typed plain "SELESAI" without a remark, DON'T close yet —
+      // ask for the resolution note first so the complainant receives a
+      // meaningful closure message. Inline "SELESAI <remark>" still works.
+      if (cmd.status === "Selesai" && !cmd.remark) {
+        await sb.from("complaint_messages").insert({
+          complaint_id: target.id,
+          direction: "outgoing",
+          channel: "whatsapp",
+          sender_phone: phone,
+          message_text: Templates.picAskResolution(target.complaint_code),
+          message_type: "text",
+          raw_payload_json: { bot_intent: "pic_awaiting_resolution" },
+        });
+        try {
+          await sendWhatsApp({
+            to: phone,
+            body: Templates.picAskResolution(target.complaint_code),
+          });
+        } catch (err) {
+          console.warn(`[wa] PIC ask resolution threw -> ${phone}:`, err);
+        }
+        return NextResponse.json({
+          ok: true,
+          kind: "pic_awaiting_resolution",
+          complaint_code: target.complaint_code,
+        });
       }
 
       await applyStatusCommand({
