@@ -81,26 +81,12 @@ export async function processIncomingComplaint(
     }
   }
 
-  // Step 2: must have evidence (current message or recent context)
-  if (!evidenceUrl) {
-    const reply = Templates.evidenceRequest();
-    await sendWhatsApp({ to: msg.phone, body: reply });
-    return { kind: "evidence_required", replySent: reply };
-  }
-
-  // Step 3: classify with combined text
+  // Simple flow: photo optional, no follow-up questions.
+  // Classify whatever text we have; default to "Fasiliti" if AI is unsure.
   const classification = await classifyComplaint(workingText, msg.imageDescription);
-
-  if (classification.needs_followup || !classification.category) {
-    const reply =
-      classification.followup_question ||
-      "Boleh berikan sedikit maklumat tambahan tentang aduan ini?";
-    await sendWhatsApp({ to: msg.phone, body: reply });
-    return { kind: "followup", replySent: reply, classification };
-  }
+  const category: Category = (classification.category as Category) || "Fasiliti";
 
   // Step 4: lookup assigned PIC
-  const category = classification.category as Category;
   const { data: assignment } = await sb
     .from("category_pic_assignments")
     .select("pic_user_id")
@@ -156,15 +142,17 @@ export async function processIncomingComplaint(
     .eq("direction", "incoming")
     .gte("created_at", TEN_MIN_AGO);
 
-  // Step 6a: ack complainant
-  const ack = Templates.ticketCreatedToComplainant(created.complaint_code);
+  // Step 6a: warm ack to complainant — includes PIC name + ETA
+  const ack = Templates.ticketCreatedToComplainant({
+    code: created.complaint_code,
+    category,
+    location: classification.location,
+    picName: pic?.full_name ?? null,
+  });
   await sendWhatsAppSafe({ to: msg.phone, body: ack });
 
-  // Twilio sandbox throttles tightly — pause before the next outbound message
-  // so the second send isn't dropped silently.
-  await sleep(1500);
-
   // Step 6b: notify PIC
+  // (Provider queue serializes + paces sends; no manual sleep needed.)
   let picNotification: string | null = null;
   if (pic?.whatsapp_phone) {
     picNotification = Templates.picNotification({
@@ -202,7 +190,9 @@ export async function applyStatusCommand(opts: {
   const sb = createAdminClient();
   const { data: existing } = await sb
     .from("complaints")
-    .select("id, complaint_code, status, complainant_phone")
+    .select(
+      "id, complaint_code, status, complainant_phone, assigned_pic_user_id"
+    )
     .eq("id", opts.complaintId)
     .single();
   if (!existing) throw new Error("Complaint not found");
@@ -215,8 +205,6 @@ export async function applyStatusCommand(opts: {
     .eq("id", opts.complaintId);
   if (error) throw error;
 
-  // The DB trigger inserts a system log; overwrite/augment it with the
-  // explicit source + reason so admin overrides are auditable.
   await sb.from("complaint_status_logs").insert({
     complaint_id: opts.complaintId,
     old_status: existing.status,
@@ -226,18 +214,32 @@ export async function applyStatusCommand(opts: {
     override_reason: opts.overrideReason ?? null,
   });
 
-  if (opts.newStatus === "Selesai") {
+  // Warm Journey: every transition sends a comforting message to the
+  // complainant so they feel progress throughout the lifecycle.
+  let picName: string | null = null;
+  if (existing.assigned_pic_user_id) {
+    const { data: picRow } = await sb
+      .from("users")
+      .select("full_name")
+      .eq("id", existing.assigned_pic_user_id)
+      .maybeSingle();
+    picName = picRow?.full_name ?? null;
+  }
+
+  if (opts.newStatus === "Dalam Tindakan") {
     await sendWhatsAppSafe({
       to: existing.complainant_phone,
-      body: Templates.closureToComplainant(),
+      body: Templates.inProgressToComplainant({
+        code: existing.complaint_code,
+        picName,
+      }),
     });
-    // Pause before the caller's next outbound (PIC ack) so Twilio doesn't drop it.
-    await sleep(1500);
+  } else if (opts.newStatus === "Selesai") {
+    await sendWhatsAppSafe({
+      to: existing.complainant_phone,
+      body: Templates.closureToComplainant(existing.complaint_code),
+    });
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**

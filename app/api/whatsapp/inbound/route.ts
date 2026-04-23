@@ -37,8 +37,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Could not parse payload" }, { status: 400 });
   }
 
-  if (!normalized || !normalized.phone || !normalized.text) {
-    // Twilio expects 200 even on no-op so it doesn't retry
+  if (!normalized || !normalized.phone) {
+    return NextResponse.json({ ok: true, kind: "ignored" });
+  }
+
+  // Image-only message (no caption) — treat as a complaint with a placeholder
+  // text so the classifier + intake pipeline can still create a ticket.
+  if (!normalized.text && normalized.evidenceUrl) {
+    normalized.text = "Aduan dengan gambar (tiada keterangan).";
+  }
+
+  if (!normalized.text) {
     return NextResponse.json({ ok: true, kind: "ignored" });
   }
 
@@ -81,11 +90,16 @@ export async function POST(req: Request) {
         changeSource: "whatsapp",
       });
 
-      // PIC ack — never let a Twilio rate-limit failure break the response.
+      // Warm ack to the PIC — confirms the complainant has been notified
+      // (where applicable) so the PIC feels their work is visible.
       try {
         const r = await sendWhatsApp({
           to: phone,
-          body: Templates.statusAck(target.complaint_code, cmd),
+          body: Templates.picStatusAck({
+            code: target.complaint_code,
+            status: cmd,
+            complainantNotified: cmd === "Dalam Tindakan" || cmd === "Selesai",
+          }),
         });
         if (!r.ok) console.warn(`[wa] PIC ack send failed -> ${phone}: ${r.error}`);
       } catch (err) {
