@@ -21,6 +21,9 @@ export async function sendWhatsApp(msg: OutgoingMessage): Promise<SendResult> {
   return getProvider().send(msg);
 }
 
+/** Conversation stages we track for the guided WhatsApp intake flow. */
+export type BotIntent = "asked_location" | "asked_photo" | "done";
+
 /**
  * Templated copy — the "Warm Journey" framework.
  *
@@ -28,6 +31,24 @@ export async function sendWhatsApp(msg: OutgoingMessage): Promise<SendResult> {
  * supported. Tone: calm, respectful, slightly caring — not robotic.
  */
 export const Templates = {
+  // ─── GUIDED INTAKE (conversational) ──────────────────────────────────
+  // Turn 1 — warm ack + ask for precise location
+  initialAckAskLocation: () =>
+    `Salam. Aduan anda kami terima dengan baik. 🙏\n\n` +
+    `Untuk membolehkan kami bertindak dengan tepat, boleh nyatakan lokasi sebenar aduan ini?\n\n` +
+    `Contoh: _Bilik Tutorial 3, Aras 2_ atau _Tandas Lelaki Blok A_.`,
+
+  // Turn 2 — ask for photo
+  askPhoto: () =>
+    `Terima kasih atas maklumat. 📍\n\n` +
+    `Seterusnya, sila lampirkan *gambar* sebagai bukti supaya pegawai bertugas dapat memahami masalah dengan lebih jelas. 📷`,
+
+  // Turn 2b — user replied after "asked_photo" but without a photo
+  photoReminder: () =>
+    `Kami masih menunggu gambar anda. Sila lampirkan satu foto sebagai bukti aduan. 📷\n\n` +
+    `Jika sukar untuk mengambil gambar, balas *TIADA* dan kami akan teruskan tanpa bukti visual.`,
+
+  // Legacy (kept for demo console backward compatibility)
   evidenceRequest: () =>
     "Salam. Terima kasih kerana menghubungi Matrivox. Untuk membantu kami memahami aduan anda dengan lebih baik, bolehkah lampirkan gambar atau tangkap layar? Terima kasih. 🙏",
 

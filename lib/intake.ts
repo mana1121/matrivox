@@ -1,6 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { classifyComplaint } from "@/lib/ai/classifier";
-import { sendWhatsApp, Templates } from "@/lib/whatsapp";
+import { sendWhatsApp, Templates, type BotIntent } from "@/lib/whatsapp";
 import { STATUSES, type Category, type Status } from "@/lib/types";
 
 export type IncomingMessage = {
@@ -11,6 +11,8 @@ export type IncomingMessage = {
 };
 
 export type IntakeOutcome =
+  | { kind: "awaiting_location"; replySent: string }
+  | { kind: "awaiting_photo"; replySent: string }
   | { kind: "evidence_required"; replySent: string }
   | {
       kind: "followup";
@@ -26,6 +28,52 @@ export type IntakeOutcome =
       picNotification: string | null;
       complainantAck: string;
     };
+
+const CONVERSATION_WINDOW_MIN = 15;
+
+/** Send a message and tag it with a conversation intent in the log. */
+async function sendAndLog(
+  sb: ReturnType<typeof createAdminClient>,
+  to: string,
+  body: string,
+  intent: BotIntent,
+): Promise<string> {
+  await sendWhatsAppSafe({ to, body });
+  await sb.from("complaint_messages").insert({
+    complaint_id: null,
+    direction: "outgoing",
+    channel: "whatsapp",
+    sender_phone: to,
+    message_text: body,
+    message_type: "text",
+    raw_payload_json: { bot_intent: intent },
+  });
+  return body;
+}
+
+/** Look up the stage of an in-flight conversation for this phone number. */
+async function getConversationStage(
+  sb: ReturnType<typeof createAdminClient>,
+  phone: string,
+): Promise<"new" | "awaiting_location" | "awaiting_photo"> {
+  const windowAgo = new Date(
+    Date.now() - CONVERSATION_WINDOW_MIN * 60_000,
+  ).toISOString();
+  const { data } = await sb
+    .from("complaint_messages")
+    .select("direction, raw_payload_json, created_at")
+    .eq("sender_phone", phone)
+    .eq("direction", "outgoing")
+    .is("complaint_id", null)
+    .gte("created_at", windowAgo)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const lastIntent = (data?.[0]?.raw_payload_json as { bot_intent?: BotIntent } | null)
+    ?.bot_intent;
+  if (lastIntent === "asked_location") return "awaiting_location";
+  if (lastIntent === "asked_photo") return "awaiting_photo";
+  return "new";
+}
 
 /**
  * Core intake pipeline. Returns an IntakeOutcome describing what happened
@@ -47,42 +95,74 @@ export async function processIncomingComplaint(
     raw_payload_json: { evidenceUrl: msg.evidenceUrl ?? null },
   });
 
-  // Conversation memory: if the current message has no evidence, look back
-  // for a recent unresolved message from the same phone that DID include
-  // evidence. WhatsApp users naturally split a complaint across multiple
-  // messages (photo first, then location in reply), so we stitch them back
-  // together here. We also concatenate prior text so the classifier sees
-  // the full context (e.g. "projektor tak function" + "dkb1" -> location=dkb1).
-  let evidenceUrl = msg.evidenceUrl ?? null;
-  let workingText = msg.text;
-  const TEN_MIN_AGO = new Date(Date.now() - 10 * 60_000).toISOString();
+  // ─── GUIDED CONVERSATION STATE MACHINE ─────────────────────────────
+  // Stage 1 (new): first message → warm ack + ask for location.
+  // Stage 2 (awaiting_location): reply received → ask for photo.
+  // Stage 3 (awaiting_photo): photo (or "TIADA") → finalize ticket.
+  const stage = await getConversationStage(sb, msg.phone);
 
-  if (!evidenceUrl) {
-    const { data: recent } = await sb
-      .from("complaint_messages")
-      .select("message_text, raw_payload_json")
-      .eq("sender_phone", msg.phone)
-      .eq("direction", "incoming")
-      .is("complaint_id", null)
-      .gte("created_at", TEN_MIN_AGO)
-      .order("created_at", { ascending: false })
-      .limit(5);
-
-    const priorWithMedia = (recent ?? []).find(
-      (m) => (m.raw_payload_json as any)?.evidenceUrl
+  if (stage === "new") {
+    const reply = await sendAndLog(
+      sb,
+      msg.phone,
+      Templates.initialAckAskLocation(),
+      "asked_location",
     );
-    if (priorWithMedia) {
-      evidenceUrl = (priorWithMedia.raw_payload_json as any).evidenceUrl;
-      const priorText = (priorWithMedia.message_text || "").trim();
-      // Combine prior + current so Claude sees both together
-      workingText = priorText
-        ? `${priorText}. ${msg.text}`.trim()
-        : msg.text;
-    }
+    return { kind: "awaiting_location", replySent: reply };
   }
 
-  // Simple flow: photo optional, no follow-up questions.
-  // Classify whatever text we have; default to "Fasiliti" if AI is unsure.
+  if (stage === "awaiting_location") {
+    // User has now told us the location. Next we need a photo.
+    const reply = await sendAndLog(
+      sb,
+      msg.phone,
+      Templates.askPhoto(),
+      "asked_photo",
+    );
+    return { kind: "awaiting_photo", replySent: reply };
+  }
+
+  // Stage: awaiting_photo — only finalize if we actually have a photo now
+  // (either in the current message or stitched from a prior inbound within
+  // the conversation window), or if the user explicitly opted out via
+  // "TIADA". Otherwise nudge again.
+  const windowAgo = new Date(
+    Date.now() - CONVERSATION_WINDOW_MIN * 60_000,
+  ).toISOString();
+
+  // Stitch all prior inbound text + media for this conversation window.
+  const { data: recentInbound } = await sb
+    .from("complaint_messages")
+    .select("message_text, raw_payload_json, created_at")
+    .eq("sender_phone", msg.phone)
+    .eq("direction", "incoming")
+    .is("complaint_id", null)
+    .gte("created_at", windowAgo)
+    .order("created_at", { ascending: true });
+
+  let evidenceUrl = msg.evidenceUrl ?? null;
+  const priorTexts: string[] = [];
+  for (const m of recentInbound ?? []) {
+    const t = (m.message_text || "").trim();
+    if (t) priorTexts.push(t);
+    const prev = (m.raw_payload_json as { evidenceUrl?: string | null } | null)
+      ?.evidenceUrl;
+    if (!evidenceUrl && prev) evidenceUrl = prev;
+  }
+  const workingText = priorTexts.join(". ").trim() || msg.text;
+
+  const optedOut = /^\s*TIADA\s*$/i.test(msg.text || "");
+  if (!evidenceUrl && !optedOut) {
+    const reply = await sendAndLog(
+      sb,
+      msg.phone,
+      Templates.photoReminder(),
+      "asked_photo",
+    );
+    return { kind: "awaiting_photo", replySent: reply };
+  }
+
+  // All set — classify and finalize the ticket.
   const classification = await classifyComplaint(workingText, msg.imageDescription);
   const category: Category = (classification.category as Category) || "Fasiliti";
 
@@ -132,15 +212,14 @@ export async function processIncomingComplaint(
     throw new Error(`Failed to create complaint: ${insertErr?.message}`);
   }
 
-  // Backfill the inbound messages (current + any earlier unresolved ones from
-  // this phone in the last 10 min) so they all link to the new complaint.
+  // Backfill ALL messages (inbound + our guiding outbound) from this phone
+  // in the conversation window so the complaint thread shows the full chat.
   await sb
     .from("complaint_messages")
     .update({ complaint_id: created.id })
     .is("complaint_id", null)
     .eq("sender_phone", msg.phone)
-    .eq("direction", "incoming")
-    .gte("created_at", TEN_MIN_AGO);
+    .gte("created_at", windowAgo);
 
   // Step 6a: warm ack to complainant — includes PIC name + ETA
   const ack = Templates.ticketCreatedToComplainant({
