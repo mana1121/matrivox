@@ -8,6 +8,8 @@ export type IncomingMessage = {
   text: string;
   evidenceUrl?: string | null;
   imageDescription?: string;
+  /** "demo" skips the guided 3-turn flow — single payload = full ticket. */
+  source?: "demo" | "whatsapp";
 };
 
 export type IntakeOutcome =
@@ -96,10 +98,12 @@ export async function processIncomingComplaint(
   });
 
   // ─── GUIDED CONVERSATION STATE MACHINE ─────────────────────────────
-  // Stage 1 (new): first message → warm ack + ask for location.
-  // Stage 2 (awaiting_location): reply received → ask for photo.
-  // Stage 3 (awaiting_photo): photo (or "TIADA") → finalize ticket.
-  const stage = await getConversationStage(sb, msg.phone);
+  // WhatsApp: Stage 1 (new) → ask location, Stage 2 → ask photo,
+  //           Stage 3 → finalize ticket.
+  // Demo Console: bypass the state machine — the operator sends a complete
+  //           payload in one shot, so finalize immediately.
+  const isDemo = msg.source === "demo";
+  const stage = isDemo ? "awaiting_photo" : await getConversationStage(sb, msg.phone);
 
   if (stage === "new") {
     const reply = await sendAndLog(
@@ -152,7 +156,7 @@ export async function processIncomingComplaint(
   const workingText = priorTexts.join(". ").trim() || msg.text;
 
   const optedOut = /^\s*TIADA\s*$/i.test(msg.text || "");
-  if (!evidenceUrl && !optedOut) {
+  if (!isDemo && !evidenceUrl && !optedOut) {
     const reply = await sendAndLog(
       sb,
       msg.phone,

@@ -26,6 +26,7 @@ type NormalizedInbound = {
   text: string;
   evidenceUrl: string | null;
   imageDescription?: string;
+  source: "demo" | "whatsapp";
 };
 
 export async function POST(req: Request) {
@@ -124,6 +125,7 @@ export async function POST(req: Request) {
     text,
     evidenceUrl: normalized.evidenceUrl,
     imageDescription: normalized.imageDescription,
+    source: normalized.source,
   });
 
   return NextResponse.json(outcome);
@@ -173,6 +175,7 @@ async function normalizeInbound(req: Request): Promise<NormalizedInbound | null>
     text,
     evidenceUrl,
     imageDescription: json.imageDescription,
+    source: "demo",
   };
 }
 
@@ -194,7 +197,7 @@ async function fromTwilioForm(form: FormData): Promise<NormalizedInbound> {
     }
   }
 
-  return { phone, text, evidenceUrl };
+  return { phone, text, evidenceUrl, source: "whatsapp" };
 }
 
 async function fromMetaPayload(payload: any): Promise<NormalizedInbound | null> {
@@ -223,7 +226,7 @@ async function fromMetaPayload(payload: any): Promise<NormalizedInbound | null> 
       evidenceUrl = await fetchMetaMediaToStorage(mediaId, mediaMime, phone);
     }
 
-    return { phone, text, evidenceUrl };
+    return { phone, text, evidenceUrl, source: "whatsapp" };
   } catch {
     return null;
   }
