@@ -9,18 +9,26 @@ export const metaProvider: WhatsAppProvider = {
       return { ok: false, error: "Meta WA env vars missing" };
     }
     const url = `https://graph.facebook.com/v20.0/${phoneId}/messages`;
+    const payload = msg.mediaUrl
+      ? {
+          messaging_product: "whatsapp",
+          to: msg.to,
+          type: "image",
+          image: { link: msg.mediaUrl, caption: msg.body },
+        }
+      : {
+          messaging_product: "whatsapp",
+          to: msg.to,
+          type: "text",
+          text: { body: msg.body },
+        };
     const res = await fetch(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: msg.to,
-        type: "text",
-        text: { body: msg.body },
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) return { ok: false, error: `Meta ${res.status}` };
     const data = (await res.json()) as { messages?: { id: string }[] };

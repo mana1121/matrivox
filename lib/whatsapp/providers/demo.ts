@@ -10,7 +10,9 @@ export const demoProvider: WhatsAppProvider = {
   name: "demo",
   async send(msg: OutgoingMessage): Promise<SendResult> {
     const id = `demo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    console.log(`[wa:demo] -> ${msg.to}: ${msg.body}`);
+    console.log(
+      `[wa:demo] -> ${msg.to}: ${msg.body}${msg.mediaUrl ? ` [media: ${msg.mediaUrl}]` : ""}`
+    );
     try {
       const sb = createAdminClient();
       await sb.from("complaint_messages").insert({
@@ -19,8 +21,8 @@ export const demoProvider: WhatsAppProvider = {
         channel: "whatsapp",
         sender_phone: msg.to,
         message_text: msg.body,
-        message_type: "text",
-        raw_payload_json: { provider: "demo", id },
+        message_type: msg.mediaUrl ? "image" : "text",
+        raw_payload_json: { provider: "demo", id, mediaUrl: msg.mediaUrl ?? null },
       });
     } catch (err) {
       console.warn("[wa:demo] failed to log outgoing message:", err);

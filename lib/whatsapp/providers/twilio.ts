@@ -40,6 +40,7 @@ async function sendWithRetry(
         from: `whatsapp:${from}`,
         to: `whatsapp:${msg.to}`,
         body: msg.body,
+        ...(msg.mediaUrl ? { mediaUrl: [msg.mediaUrl] } : {}),
       });
       lastSentAt = Date.now();
       console.log(`[wa:twilio] sent ${data.sid} -> ${msg.to}`);

@@ -1,6 +1,8 @@
 export type OutgoingMessage = {
   to: string;
   body: string;
+  /** Optional public URL of an image/media to attach (e.g. evidence photo). */
+  mediaUrl?: string;
 };
 
 export type SendResult = {

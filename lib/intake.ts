@@ -151,8 +151,8 @@ export async function processIncomingComplaint(
   });
   await sendWhatsAppSafe({ to: msg.phone, body: ack });
 
-  // Step 6b: notify PIC
-  // (Provider queue serializes + paces sends; no manual sleep needed.)
+  // Step 6b: notify PIC — forward the evidence photo when available so
+  // the PIC can triage straight from WhatsApp without opening the dashboard.
   let picNotification: string | null = null;
   if (pic?.whatsapp_phone) {
     picNotification = Templates.picNotification({
@@ -162,7 +162,11 @@ export async function processIncomingComplaint(
       summary: classification.summary,
       complainantPhone: msg.phone,
     });
-    await sendWhatsAppSafe({ to: pic.whatsapp_phone, body: picNotification });
+    await sendWhatsAppSafe({
+      to: pic.whatsapp_phone,
+      body: picNotification,
+      mediaUrl: evidenceUrl ?? undefined,
+    });
   }
 
   return {
@@ -246,7 +250,11 @@ export async function applyStatusCommand(opts: {
  * Wrapper around sendWhatsApp that never throws — failures are logged so a
  * single rate-limited message doesn't break the rest of the intake flow.
  */
-async function sendWhatsAppSafe(msg: { to: string; body: string }): Promise<void> {
+async function sendWhatsAppSafe(msg: {
+  to: string;
+  body: string;
+  mediaUrl?: string;
+}): Promise<void> {
   try {
     const r = await sendWhatsApp(msg);
     if (!r.ok) {
