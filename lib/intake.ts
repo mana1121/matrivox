@@ -190,6 +190,8 @@ export async function applyStatusCommand(opts: {
   changedByUserId?: string | null;
   changeSource: "whatsapp" | "dashboard" | "system";
   overrideReason?: string | null;
+  /** Optional note from the PIC — shown to the complainant in the update. */
+  picRemark?: string | null;
 }): Promise<void> {
   const sb = createAdminClient();
   const { data: existing } = await sb
@@ -215,7 +217,9 @@ export async function applyStatusCommand(opts: {
     new_status: opts.newStatus,
     changed_by_user_id: opts.changedByUserId ?? null,
     change_source: opts.changeSource,
-    override_reason: opts.overrideReason ?? null,
+    // Reuse override_reason as the transition note — covers both admin
+    // overrides and PIC remarks (migration can rename later).
+    override_reason: opts.overrideReason ?? opts.picRemark ?? null,
   });
 
   // Warm Journey: every transition sends a comforting message to the
@@ -236,12 +240,16 @@ export async function applyStatusCommand(opts: {
       body: Templates.inProgressToComplainant({
         code: existing.complaint_code,
         picName,
+        picRemark: opts.picRemark ?? null,
       }),
     });
   } else if (opts.newStatus === "Selesai") {
     await sendWhatsAppSafe({
       to: existing.complainant_phone,
-      body: Templates.closureToComplainant(existing.complaint_code),
+      body: Templates.closureToComplainant(
+        existing.complaint_code,
+        opts.picRemark ?? null,
+      ),
     });
   }
 }
@@ -271,7 +279,29 @@ const COMMAND_MAP: Record<string, Status> = {
   SELESAI: "Selesai",
 };
 
-export function parsePicCommand(text: string): Status | null {
-  const norm = text.trim().toUpperCase().replace(/\s+/g, " ");
-  return COMMAND_MAP[norm] ?? null;
+// Ordered longest-first so "DALAM TINDAKAN" matches before "DALAM".
+const COMMAND_KEYS = Object.keys(COMMAND_MAP).sort((a, b) => b.length - a.length);
+
+/**
+ * Parse a PIC WhatsApp command. Supports an optional trailing remark:
+ *   "SELESAI paip telah diganti"        -> { status: "Selesai", remark: "paip telah diganti" }
+ *   "DALAM TINDAKAN saya dalam 1 jam"   -> { status: "Dalam Tindakan", remark: "saya dalam 1 jam" }
+ *   "TERIMA"                             -> { status: "Diterima",     remark: null }
+ */
+export function parsePicCommand(
+  text: string,
+): { status: Status; remark: string | null } | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const upper = trimmed.toUpperCase().replace(/\s+/g, " ");
+  for (const cmd of COMMAND_KEYS) {
+    if (upper === cmd) return { status: COMMAND_MAP[cmd], remark: null };
+    if (upper.startsWith(cmd + " ")) {
+      // Slice from the original text preserving case; use normalized length.
+      const normalizedTrimmed = trimmed.replace(/\s+/g, " ");
+      const remark = normalizedTrimmed.slice(cmd.length).trim();
+      return { status: COMMAND_MAP[cmd], remark: remark || null };
+    }
+  }
+  return null;
 }

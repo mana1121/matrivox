@@ -53,7 +53,7 @@ export async function POST(req: Request) {
 
   const { phone, text } = normalized;
 
-  // Step A: PIC command path
+  // Step A: PIC command path (parses "SELESAI <remark>" etc.)
   const cmd = parsePicCommand(text);
   if (cmd) {
     const sb = createAdminClient();
@@ -85,9 +85,10 @@ export async function POST(req: Request) {
 
       await applyStatusCommand({
         complaintId: target.id,
-        newStatus: cmd,
+        newStatus: cmd.status,
         changedByUserId: pic.id,
         changeSource: "whatsapp",
+        picRemark: cmd.remark,
       });
 
       // Warm ack to the PIC — confirms the complainant has been notified
@@ -97,8 +98,9 @@ export async function POST(req: Request) {
           to: phone,
           body: Templates.picStatusAck({
             code: target.complaint_code,
-            status: cmd,
-            complainantNotified: cmd === "Dalam Tindakan" || cmd === "Selesai",
+            status: cmd.status,
+            complainantNotified:
+              cmd.status === "Dalam Tindakan" || cmd.status === "Selesai",
           }),
         });
         if (!r.ok) console.warn(`[wa] PIC ack send failed -> ${phone}: ${r.error}`);
@@ -110,7 +112,8 @@ export async function POST(req: Request) {
         ok: true,
         kind: "pic_command_applied",
         complaint_code: target.complaint_code,
-        new_status: cmd,
+        new_status: cmd.status,
+        pic_remark: cmd.remark,
       });
     }
     // sender isn't a PIC — fall through to complaint intake

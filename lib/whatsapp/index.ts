@@ -57,14 +57,22 @@ export const Templates = {
   },
 
   // T3: status moved to "Dalam Tindakan" — show progress, reassure
-  inProgressToComplainant: (opts: { code: string; picName: string | null }) =>
+  inProgressToComplainant: (opts: {
+    code: string;
+    picName: string | null;
+    picRemark: string | null;
+  }) =>
     `🔧 Kemas kini aduan *${opts.code}*\n\n` +
-    (opts.picName ? `${opts.picName} kini sedang menguruskan aduan anda. ` : `Aduan anda kini dalam tindakan. `) +
-    `Terima kasih atas kesabaran anda. 🙏`,
+    (opts.picName
+      ? `${opts.picName} kini sedang menguruskan aduan anda.`
+      : `Aduan anda kini dalam tindakan.`) +
+    (opts.picRemark ? `\n\n📝 Nota: ${opts.picRemark}` : "") +
+    `\n\nTerima kasih atas kesabaran anda. 🙏`,
 
   // T4: resolved — invite re-engagement, end on warmth
-  closureToComplainant: (code: string) =>
+  closureToComplainant: (code: string, picRemark: string | null) =>
     `✅ Aduan *${code}* telah diselesaikan.\n\n` +
+    (picRemark ? `📝 Tindakan diambil: ${picRemark}\n\n` : "") +
     `Terima kasih kerana membantu kami memperbaiki kampus. ` +
     `Jika isu masih berlaku atau anda ingin berkongsi maklum balas, ` +
     `sila balas mesej ini. 💬`,
