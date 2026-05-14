@@ -11,6 +11,12 @@ export default function StudentsClient({ students }: { students: Student[] }) {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const [uploading, setUploading] = useState(false);
+  const [uploadSummary, setUploadSummary] = useState<{
+    imported: number;
+    skipped: number;
+    errors: { row: number; reason: string }[];
+  } | null>(null);
 
   const [fullName, setFullName] = useState("");
   const [ic, setIc] = useState("");
@@ -18,6 +24,53 @@ export default function StudentsClient({ students }: { students: Student[] }) {
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<StudentRole>("pelajar");
+
+  function downloadSampleCsv() {
+    const csv =
+      "Nama,No. KP,No. Matrik,No. WhatsApp,Emel,Peranan\n" +
+      "Hazman Jazimin,830708146527,MD0256789,+60102888897,hazman@kms.edu.my,pelajar\n" +
+      "Siti Aminah,991201145623,MD0256790,0123456789,siti@kms.edu.my,pelajar\n" +
+      "En Arif Razak,780115085522,,+60134606279,arif@kms.edu.my,staff\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "matrivox-students-template.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function uploadFile(file: File) {
+    setError(null);
+    setUploadSummary(null);
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/admin/students/bulk", {
+        method: "POST",
+        body: fd,
+      });
+      const j = await res.json();
+      if (!res.ok) {
+        setError(j?.error || `Ralat HTTP ${res.status}`);
+        if (j?.errors) {
+          setUploadSummary({ imported: 0, skipped: j.errors.length, errors: j.errors });
+        }
+      } else {
+        setUploadSummary({
+          imported: j.imported ?? 0,
+          skipped: j.skipped ?? 0,
+          errors: j.errors ?? [],
+        });
+        router.refresh();
+      }
+    } catch (err: any) {
+      setError(err?.message || "Ralat ketika muat naik.");
+    } finally {
+      setUploading(false);
+    }
+  }
 
   async function callApi(url: string, body: any, method = "POST") {
     setError(null);
@@ -63,17 +116,61 @@ export default function StudentsClient({ students }: { students: Student[] }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-slate-600">
           Jumlah berdaftar: <span className="font-semibold text-slate-900">{students.length}</span>
         </p>
-        <button
-          onClick={() => setOpen((o) => !o)}
-          className="rounded-lg bg-brand-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-brand-700"
-        >
-          {open ? "Batal" : "+ Daftar Pengguna"}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={downloadSampleCsv}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+          >
+            ⬇️ Sample CSV
+          </button>
+          <label className="cursor-pointer rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-xs font-semibold text-brand-700 hover:bg-brand-100">
+            {uploading ? "Memuat naik…" : "📂 Upload Excel/CSV"}
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              disabled={uploading}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) uploadFile(f);
+                e.target.value = "";
+              }}
+              className="hidden"
+            />
+          </label>
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="rounded-lg bg-brand-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-brand-700"
+          >
+            {open ? "Batal" : "+ Daftar Pengguna"}
+          </button>
+        </div>
       </div>
+
+      {uploadSummary && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm">
+          <div className="font-semibold text-emerald-900">
+            ✓ Selesai import — {uploadSummary.imported} berjaya, {uploadSummary.skipped} dilangkau
+          </div>
+          {uploadSummary.errors.length > 0 && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-emerald-800">
+                Lihat baris yang dilangkau ({uploadSummary.errors.length})
+              </summary>
+              <ul className="mt-2 space-y-1 text-xs text-rose-700">
+                {uploadSummary.errors.map((e, i) => (
+                  <li key={i}>
+                    Baris {e.row}: {e.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
 
       {open && (
         <form
