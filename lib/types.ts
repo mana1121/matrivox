@@ -22,6 +22,21 @@ export type ClassificationResult = {
   source: "claude" | "keyword";
 };
 
+export type StudentRole = "pelajar" | "staff" | "pensyarah";
+
+export type Student = {
+  id: string;
+  full_name: string;
+  ic_number: string | null;
+  matric_number: string | null;
+  whatsapp_phone: string;
+  email: string | null;
+  role: StudentRole;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AppUser = {
   id: string;
   email: string;

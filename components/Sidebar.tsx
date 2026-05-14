@@ -59,6 +59,7 @@ export default function Sidebar({ role }: { role: Role }) {
     { href: "/admin/dashboard", label: "Papan Pemuka", icon: <IconHome /> },
     { href: "/admin/complaints", label: "Aduan", icon: <IconList /> },
     { href: "/admin/pic-management", label: "Pengurusan PIC", icon: <IconUsers /> },
+    { href: "/admin/students", label: "Pelajar / Staf", icon: <IconUsers /> },
     { href: "/admin/settings", label: "Tetapan", icon: <IconSettings /> },
     { href: "/admin/demo", label: "Demo Console", icon: <IconConsole /> },
   ];

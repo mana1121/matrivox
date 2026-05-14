@@ -32,9 +32,13 @@ export type BotIntent = "asked_location" | "asked_photo" | "done";
  */
 export const Templates = {
   // ─── GUIDED INTAKE (conversational) ──────────────────────────────────
-  // Turn 1 — warm ack + ask for precise location
-  initialAckAskLocation: () =>
-    `Salam. Aduan anda kami terima dengan baik. 🙏\n\n` +
+  // Turn 1 — warm ack + ask for precise location.
+  // Personalized when sender is a registered student.
+  initialAckAskLocation: (complainantName: string | null = null) =>
+    (complainantName
+      ? `Salam *${complainantName}*. Aduan anda kami terima dengan baik. 🙏`
+      : `Salam. Aduan anda kami terima dengan baik. 🙏`) +
+    `\n\n` +
     `Untuk membolehkan kami bertindak dengan tepat, boleh nyatakan lokasi sebenar aduan ini?\n\n` +
     `Contoh: _Bilik Tutorial 3, Aras 2_ atau _Tandas Lelaki Blok A_.`,
 
@@ -55,19 +59,24 @@ export const Templates = {
   followUp: (q: string) => q,
 
   // ─── COMPLAINANT JOURNEY ─────────────────────────────────────────────
-  // T1: ticket created — warm welcome with code, PIC name, and ETA
+  // T1: ticket created — warm welcome with code, PIC name, and ETA.
+  // If the sender is a registered student, greet them by name.
   ticketCreatedToComplainant: (opts: {
     code: string;
     category: string;
     location: string | null;
     picName: string | null;
+    complainantName: string | null;
   }) => {
     const picLine = opts.picName
       ? `👤 Pegawai bertugas: *${opts.picName}*`
       : `👤 Pegawai bertugas akan dimaklumkan tidak lama lagi.`;
     const locLine = opts.location ? `📍 Lokasi: ${opts.location}\n` : "";
+    const greeting = opts.complainantName
+      ? `Salam *${opts.complainantName}*. Aduan anda telah kami terima dengan baik. 🙏`
+      : `Salam. Aduan anda telah kami terima dengan baik. 🙏`;
     return (
-      `Salam. Aduan anda telah kami terima dengan baik. 🙏\n\n` +
+      `${greeting}\n\n` +
       `📋 No. rujukan: *${opts.code}*\n` +
       `📂 Kategori: ${opts.category}\n` +
       `${locLine}` +
@@ -105,25 +114,43 @@ export const Templates = {
     `Terima kasih atas kesabaran anda. 🙏`,
 
   // ─── PIC JOURNEY ─────────────────────────────────────────────────────
-  // P0: new complaint assigned to PIC
+  // P0: new complaint assigned to PIC.
+  // Includes student identity when the sender is registered.
   picNotification: (opts: {
     code: string;
     category: string;
     location: string | null;
     summary: string;
     complainantPhone: string;
-  }) =>
-    `🛎️ *Aduan baharu Matrivox*\n\n` +
-    `📋 No: *${opts.code}*\n` +
-    `📂 Kategori: ${opts.category}\n` +
-    `📍 Lokasi: ${opts.location || "Tidak dinyatakan"}\n` +
-    `📝 Ringkasan: ${opts.summary}\n` +
-    `📞 Pengadu: ${opts.complainantPhone}\n\n` +
-    `Balas dengan:\n` +
-    `• *TERIMA* — sahkan menerima\n` +
-    `• *DALAM TINDAKAN* — kerja sedang dilakukan\n` +
-    `• *SELESAI* — aduan selesai\n\n` +
-    `Terima kasih atas khidmat anda. 🙏`,
+    complainantName?: string | null;
+    complainantMatric?: string | null;
+    complainantIc?: string | null;
+    complainantRole?: string | null;
+  }) => {
+    const identityLines: string[] = [];
+    if (opts.complainantName) {
+      identityLines.push(`👤 Pengadu: *${opts.complainantName}*`);
+      if (opts.complainantRole) identityLines.push(`   Peranan: ${opts.complainantRole}`);
+      if (opts.complainantMatric) identityLines.push(`   Matrik: ${opts.complainantMatric}`);
+      if (opts.complainantIc) identityLines.push(`   No. KP: ${opts.complainantIc}`);
+      identityLines.push(`   📞 ${opts.complainantPhone}`);
+    } else {
+      identityLines.push(`📞 Pengadu: ${opts.complainantPhone} _(tidak berdaftar)_`);
+    }
+    return (
+      `🛎️ *Aduan baharu Matrivox*\n\n` +
+      `📋 No: *${opts.code}*\n` +
+      `📂 Kategori: ${opts.category}\n` +
+      `📍 Lokasi: ${opts.location || "Tidak dinyatakan"}\n` +
+      `📝 Ringkasan: ${opts.summary}\n` +
+      identityLines.join("\n") +
+      `\n\nBalas dengan:\n` +
+      `• *TERIMA* — sahkan menerima\n` +
+      `• *DALAM TINDAKAN* — kerja sedang dilakukan\n` +
+      `• *SELESAI* — aduan selesai\n\n` +
+      `Terima kasih atas khidmat anda. 🙏`
+    );
+  },
 
   // Asked to PIC when they type "SELESAI" without a resolution note —
   // prompts them to describe the action taken before closing the ticket.

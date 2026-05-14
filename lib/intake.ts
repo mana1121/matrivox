@@ -97,6 +97,16 @@ export async function processIncomingComplaint(
     raw_payload_json: { evidenceUrl: msg.evidenceUrl ?? null },
   });
 
+  // Identity enrichment: if the sender is a registered student, fetch the
+  // profile so we can greet them by name and forward identity to the PIC.
+  const { data: student } = await sb
+    .from("students")
+    .select("full_name, ic_number, matric_number, role, is_active")
+    .eq("whatsapp_phone", msg.phone)
+    .eq("is_active", true)
+    .maybeSingle();
+  const complainantName = student?.full_name ?? null;
+
   // ─── GUIDED CONVERSATION STATE MACHINE ─────────────────────────────
   // WhatsApp: Stage 1 (new) → ask location, Stage 2 → ask photo,
   //           Stage 3 → finalize ticket.
@@ -109,7 +119,7 @@ export async function processIncomingComplaint(
     const reply = await sendAndLog(
       sb,
       msg.phone,
-      Templates.initialAckAskLocation(),
+      Templates.initialAckAskLocation(complainantName),
       "asked_location",
     );
     return { kind: "awaiting_location", replySent: reply };
@@ -225,17 +235,20 @@ export async function processIncomingComplaint(
     .eq("sender_phone", msg.phone)
     .gte("created_at", windowAgo);
 
-  // Step 6a: warm ack to complainant — includes PIC name + ETA
+  // Step 6a: warm ack to complainant — includes PIC name + ETA.
+  // Personalized greeting when the sender is a registered student.
   const ack = Templates.ticketCreatedToComplainant({
     code: created.complaint_code,
     category,
     location: classification.location,
     picName: pic?.full_name ?? null,
+    complainantName,
   });
   await sendWhatsAppSafe({ to: msg.phone, body: ack });
 
   // Step 6b: notify PIC — forward the evidence photo when available so
   // the PIC can triage straight from WhatsApp without opening the dashboard.
+  // Include student identity (name, IC, matric, role) when registered.
   let picNotification: string | null = null;
   if (pic?.whatsapp_phone) {
     picNotification = Templates.picNotification({
@@ -244,6 +257,10 @@ export async function processIncomingComplaint(
       location: classification.location,
       summary: classification.summary,
       complainantPhone: msg.phone,
+      complainantName,
+      complainantMatric: student?.matric_number ?? null,
+      complainantIc: student?.ic_number ?? null,
+      complainantRole: student?.role ?? null,
     });
     await sendWhatsAppSafe({
       to: pic.whatsapp_phone,
