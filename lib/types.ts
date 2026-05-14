@@ -3,6 +3,7 @@ export const CATEGORIES = [
   "ICT",
   "Fasiliti",
   "Kerohanian & Salah Laku",
+  "Kerosakan Asrama",
 ] as const;
 export type Category = (typeof CATEGORIES)[number];
 

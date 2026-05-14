@@ -15,6 +15,14 @@ const KEYWORDS: Record<Category, string[]> = {
     "rosak", "pecah", "bocor", "patah", "runtuh", "jatuh", "siling",
     "lantai", "dinding", "bumbung", "bahaya", "retak", "longkang",
   ],
+  "Kerosakan Asrama": [
+    "asrama", "bilik asrama", "dorm", "hostel", "katil", "bunk",
+    "tilam", "almari asrama", "almari pakaian", "loker",
+    "kunci bilik", "kunci asrama", "pintu asrama", "tingkap asrama",
+    "kipas asrama", "lampu asrama", "paip asrama", "tandas asrama",
+    "shower asrama", "dapur asrama", "kawasan asrama",
+    "warden", "ketua asrama", "blok asrama",
+  ],
   "Kerohanian & Salah Laku": [
     // Religious / moral conduct
     "khalwat", "berkhalwat", "solat", "tidak solat", "tinggalkan solat",
@@ -64,6 +72,7 @@ function keywordClassify(message: string): ClassificationResult {
     ICT: 0,
     Fasiliti: 0,
     "Kerohanian & Salah Laku": 0,
+    "Kerosakan Asrama": 0,
   };
 
   for (const cat of CATEGORIES) {
@@ -77,7 +86,15 @@ function keywordClassify(message: string): ClassificationResult {
   // Cleanliness words reinforce Kebersihan in ambiguous cases.
   const hasDamage = DAMAGE_WORDS.some((w) => text.includes(w));
   const hasCleanliness = CLEANLINESS_WORDS.some((w) => text.includes(w));
-  if (hasDamage && !hasCleanliness) scores.Fasiliti += 2;
+  const hasAsrama = /\b(asrama|dorm|hostel)\b/i.test(text);
+
+  // Damage + asrama context -> Kerosakan Asrama (specific bucket).
+  // Damage WITHOUT asrama context -> Fasiliti (general campus).
+  if (hasDamage && hasAsrama && !hasCleanliness) {
+    scores["Kerosakan Asrama"] += 3;
+  } else if (hasDamage && !hasCleanliness) {
+    scores.Fasiliti += 2;
+  }
   if (hasCleanliness && !hasDamage) scores.Kebersihan += 1;
 
   const ranked = (Object.entries(scores) as [Category, number][]).sort((a, b) => b[1] - a[1]);
@@ -136,11 +153,24 @@ You classify Malay/English complaints into ONE of these categories:
                    computers, laptops, screens, login/system issues, apps.
                    Key intent: "something DIGITAL is not working".
 
-- "Fasiliti"    -> PHYSICAL INFRASTRUCTURE issues: broken/damaged items,
-                   lights, fans, taps, doors, chairs, tables, windows,
-                   walls, ceilings, drains that are BROKEN (not clogged),
-                   leaks, cracks, safety hazards.
-                   Key intent: "something is BROKEN, DAMAGED, or UNSAFE".
+- "Fasiliti"    -> PHYSICAL INFRASTRUCTURE issues (NON-hostel):
+                   broken/damaged items in academic / common areas —
+                   classrooms, halls, ICT labs, cafeteria, mosque,
+                   offices, corridors. Lights, fans, taps, doors,
+                   chairs, tables, windows, walls, ceilings, drains
+                   that are BROKEN (not clogged), leaks, cracks,
+                   safety hazards.
+                   Key intent: "something is BROKEN/DAMAGED in a
+                   general campus area (not in the dormitory)".
+
+- "Kerosakan Asrama" -> PHYSICAL DAMAGE issues SPECIFIC to the
+                   dormitory / hostel / asrama / dorm room:
+                   broken bed (katil patah), damaged wardrobe (almari
+                   rosak), broken door lock (kunci bilik rosak),
+                   leaking pipe in asrama bathroom (paip asrama bocor),
+                   broken fan in asrama, damaged window in dorm,
+                   ANY damage/breakage within asrama/dorm/hostel.
+                   Key intent: "something is BROKEN in the ASRAMA".
 
 - "Kerohanian & Salah Laku" -> ALL student conduct issues, both moral/
                    religious AND general disciplinary. This includes:
@@ -161,14 +191,26 @@ CRITICAL DISAMBIGUATION RULES:
 - "tandas kotor / tandas bau / tandas bersepah" -> Kebersihan (dirt)
 - "berkhalwat / tidak solat / merokok / ponteng / lgbt" -> Kerohanian & Salah Laku
 - "merokok dalam surau" -> Kerohanian & Salah Laku (the act is the issue)
+- ANY damage/breakage that mentions "asrama / bilik asrama / dorm / hostel"
+  -> Kerosakan Asrama (NOT Fasiliti). Examples:
+    • "katil patah di bilik asrama 12" -> Kerosakan Asrama
+    • "paip bocor dalam tandas asrama" -> Kerosakan Asrama
+    • "kunci bilik asrama rosak" -> Kerosakan Asrama
+    • "almari pakaian asrama patah" -> Kerosakan Asrama
+- Damage WITHOUT asrama context -> Fasiliti:
+    • "katil patah di bilik klinik" -> Fasiliti
+    • "lampu rosak di dewan kuliah" -> Fasiliti
+- "asrama kotor / asrama berbau" -> Kebersihan (it's a cleanliness issue,
+  not damage; asrama context doesn't override cleanliness category)
 - Whenever the user mentions "pecah, rosak, bocor, patah, retak, bahaya,
-  runtuh" treat it as Fasiliti UNLESS the main problem is clearly dirt.
+  runtuh" treat it as Fasiliti (or Kerosakan Asrama if asrama mentioned)
+  UNLESS the main problem is clearly dirt.
 - Whenever the user mentions "kotor, bau, busuk, sampah, tersumbat" treat
   it as Kebersihan UNLESS the main problem is clearly physical damage.
 
 Return STRICT JSON. No prose, no markdown fences. Schema:
 {
-  "category": "Kebersihan" | "ICT" | "Fasiliti" | "Kerohanian & Salah Laku" | null,
+  "category": "Kebersihan" | "ICT" | "Fasiliti" | "Kerohanian & Salah Laku" | "Kerosakan Asrama" | null,
   "location": string | null,
   "summary": string,           // <= 120 chars, neutral, in Malay if input is Malay
   "confidence": number,        // 0..1
