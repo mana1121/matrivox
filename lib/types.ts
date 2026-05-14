@@ -1,4 +1,10 @@
-export const CATEGORIES = ["Kebersihan", "ICT", "Fasiliti"] as const;
+export const CATEGORIES = [
+  "Kebersihan",
+  "ICT",
+  "Fasiliti",
+  "Kerohanian",
+  "Salah Laku",
+] as const;
 export type Category = (typeof CATEGORIES)[number];
 
 export const STATUSES = ["Diterima", "Dalam Tindakan", "Selesai"] as const;

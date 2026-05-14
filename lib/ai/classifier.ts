@@ -15,6 +15,19 @@ const KEYWORDS: Record<Category, string[]> = {
     "rosak", "pecah", "bocor", "patah", "runtuh", "jatuh", "siling",
     "lantai", "dinding", "bumbung", "bahaya", "retak", "longkang",
   ],
+  Kerohanian: [
+    "khalwat", "berkhalwat", "solat", "tidak solat", "tinggalkan solat",
+    "azan", "surau", "masjid", "aurat", "pakaian tidak sopan",
+    "menutup aurat", "hijab", "ramadhan", "puasa", "tidak puasa",
+    "agama", "akhlak", "moral", "ibadah",
+  ],
+  "Salah Laku": [
+    "ponteng", "ponteng kelas", "merokok", "vape", "rokok",
+    "bergaduh", "gaduh", "buli", "membuli", "mencuri", "curi",
+    "kantoi", "salah laku", "disiplin", "melanggar peraturan",
+    "tidak hadir", "lewat", "rambut panjang", "uniform",
+    "kemas diri", "judi", "dadah", "arak", "skip kelas",
+  ],
 };
 
 // Disambiguation — some words appear in multiple categories depending on
@@ -27,6 +40,12 @@ const DAMAGE_WORDS = [
 ];
 const CLEANLINESS_WORDS = [
   "kotor", "bau", "busuk", "sampah", "tersumbat", "najis",
+];
+// Strong Salah Laku indicators that override venue keywords.
+// e.g. "merokok dalam surau" — the issue is smoking (Salah Laku), not surau.
+const MISCONDUCT_OVERRIDE_WORDS = [
+  "merokok", "vape", "rokok", "ponteng", "bergaduh", "buli",
+  "mencuri", "judi", "dadah", "arak",
 ];
 
 const LOCATION_HINTS = [
@@ -43,7 +62,13 @@ const LOCATION_HINTS = [
 
 function keywordClassify(message: string): ClassificationResult {
   const text = message.toLowerCase();
-  const scores: Record<Category, number> = { Kebersihan: 0, ICT: 0, Fasiliti: 0 };
+  const scores: Record<Category, number> = {
+    Kebersihan: 0,
+    ICT: 0,
+    Fasiliti: 0,
+    Kerohanian: 0,
+    "Salah Laku": 0,
+  };
 
   for (const cat of CATEGORIES) {
     for (const kw of KEYWORDS[cat]) {
@@ -58,6 +83,12 @@ function keywordClassify(message: string): ClassificationResult {
   const hasCleanliness = CLEANLINESS_WORDS.some((w) => text.includes(w));
   if (hasDamage && !hasCleanliness) scores.Fasiliti += 2;
   if (hasCleanliness && !hasDamage) scores.Kebersihan += 1;
+
+  // Misconduct override: e.g. "merokok dalam surau" — the act (smoking)
+  // is the complaint, not the venue. Boost Salah Laku to outweigh any
+  // Kerohanian keyword that matched only via the venue (surau/masjid/etc).
+  const hasMisconduct = MISCONDUCT_OVERRIDE_WORDS.some((w) => text.includes(w));
+  if (hasMisconduct) scores["Salah Laku"] += 2;
 
   const ranked = (Object.entries(scores) as [Category, number][]).sort((a, b) => b[1] - a[1]);
   const [topCat, topScore] = ranked[0];
@@ -121,11 +152,30 @@ You classify Malay/English complaints into ONE of these categories:
                    leaks, cracks, safety hazards.
                    Key intent: "something is BROKEN, DAMAGED, or UNSAFE".
 
+- "Kerohanian"  -> RELIGIOUS / MORAL / SPIRITUAL conduct issues: khalwat
+                   (close proximity between unmarried couples), tidak
+                   solat (skipping prayer), tidak menutup aurat (improper
+                   dress for Muslim modesty rules), tidak puasa during
+                   Ramadan, behavior at surau/masjid, conduct against
+                   Islamic religious rules (akhlak / ibadah / moral).
+                   Key intent: "moral or religious conduct breach".
+
+- "Salah Laku" -> GENERAL STUDENT MISCONDUCT (non-religious): ponteng
+                   kelas (skipping class), merokok / vape, bergaduh,
+                   buli, mencuri, judi, dadah, arak, melanggar peraturan
+                   asrama/sekolah, uniform / rambut tidak kemas, lewat
+                   tanpa alasan.
+                   Key intent: "disciplinary breach of school rules".
+
 CRITICAL DISAMBIGUATION RULES:
 - "longkang pecah / longkang rosak / longkang bocor" -> Fasiliti (damage)
 - "longkang tersumbat / longkang kotor / longkang bau" -> Kebersihan (dirt)
 - "tandas bocor / tandas rosak / paip tandas pecah" -> Fasiliti (damage)
 - "tandas kotor / tandas bau / tandas bersepah" -> Kebersihan (dirt)
+- "berkhalwat / tidak menutup aurat / tinggal solat" -> Kerohanian
+- "ponteng / merokok / bergaduh / mencuri" -> Salah Laku
+- "merokok dalam surau" -> still Salah Laku (smoking is the issue)
+- "tidak puasa" -> Kerohanian; "makan di kantin masa puasa" -> Kerohanian
 - Whenever the user mentions "pecah, rosak, bocor, patah, retak, bahaya,
   runtuh" treat it as Fasiliti UNLESS the main problem is clearly dirt.
 - Whenever the user mentions "kotor, bau, busuk, sampah, tersumbat" treat
@@ -133,7 +183,7 @@ CRITICAL DISAMBIGUATION RULES:
 
 Return STRICT JSON. No prose, no markdown fences. Schema:
 {
-  "category": "Kebersihan" | "ICT" | "Fasiliti" | null,
+  "category": "Kebersihan" | "ICT" | "Fasiliti" | "Kerohanian" | "Salah Laku" | null,
   "location": string | null,
   "summary": string,           // <= 120 chars, neutral, in Malay if input is Malay
   "confidence": number,        // 0..1
